@@ -1826,7 +1826,17 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		sealedLead = leadProvider(scope, parent)
 		sealers = []string{sealedLead, leadProvider(scope, conv)}
 		readable := func() bool {
-			return isGroup && slices.ContainsFunc(ms, func(m provider.Member) bool { return s.sealedReader(m.Provider, m.Model, sealers) }) || !isGroup && s.sealedReader(p, model, sealers)
+			// a reader out of its allowance can't answer either: the
+			// sealed messages are dropped with a note (#1613) and the
+			// request goes to whoever can
+			reader := func(p provider.Provider, model string) bool {
+				if !s.sealedReader(p, model, sealers) {
+					return false
+				}
+				_, spent := spentModel(p, model, from, time.Now())
+				return !spent
+			}
+			return isGroup && slices.ContainsFunc(ms, func(m provider.Member) bool { return reader(m.Provider, m.Model) }) || !isGroup && reader(p, model)
 		}
 		if !readable() {
 			// affinity let the lead go (a day since, a restart, its reply

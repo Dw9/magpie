@@ -146,6 +146,47 @@ func TestCodexSpentMovesToGrokWithSealedReasoning(t *testing.T) {
 	}
 }
 
+// A spent Codex account is no reader of a sealed agent message: the
+// messages are dropped with a note and the next member answers (#1613),
+// not held to the spent account until its window renews.
+func TestCodexSpentDropsSealedAgentMessage(t *testing.T) {
+	usedUpShapes(t, func(t *testing.T, refuse func(w http.ResponseWriter)) {
+		codexSignedIn(t)
+		sticks.Lock()
+		sticks.m = map[string]stick{}
+		sticks.Unlock()
+		var tried []string
+		chatgptRefusing(t, &tried, refuse)
+		var sent []string
+		grok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			sent = append(sent, string(b))
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, grokAnswer)
+		}))
+		t.Cleanup(grok.Close)
+		if err := provider.Save(provider.Provider{ID: "xai", Name: "XAI", Key: "k", Models: []string{"m"}, Chat: grok.URL + "/v1"}); err != nil {
+			t.Fatal(err)
+		}
+		refusalGroup(t, "codex/gpt-5.5", "xai/m")
+		s := New()
+		// the account runs out first, resting it, before the conversation's
+		// sealed messages come back around
+		if rec := codexOn(s, CodexPath+"/responses", codexAsk); rec.Code != 200 {
+			t.Fatalf("the turn before %d: %s (codex %v)", rec.Code, rec.Body.String(), tried)
+		}
+		in := `{"type":"message","role":"user","content":[{"type":"input_text","text":"go on"}]},` +
+			`{"type":"agent_message","author":"researcher","content":[{"type":"input_text","text":"Message Type: MESSAGE\nhere is what I found"},{"type":"encrypted_content","encrypted_content":"gAAAAABsealedbythechatgptbackend00"}]}`
+		rec := codexOn(s, CodexPath+"/responses", `{"model":"group/g","stream":true,"input":[`+in+`]}`)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "hello") {
+			t.Fatalf("%d: %s (codex %v)", rec.Code, rec.Body.String(), tried)
+		}
+		if len(sent) == 0 || strings.Contains(sent[len(sent)-1], "gAAAAAB") || !strings.Contains(sent[len(sent)-1], "was sealed by the ChatGPT backend") {
+			t.Fatalf("the relay was sent the sealed message as it came: %s", sent)
+		}
+	})
+}
+
 // usedUpShapes runs for the shapes of codexSpent saying the allowance is
 // gone, rather than a moment's rate limit or a plan without Codex.
 func usedUpShapes(t *testing.T, run func(t *testing.T, refuse func(w http.ResponseWriter))) {
